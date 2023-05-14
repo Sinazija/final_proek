@@ -1,12 +1,12 @@
 from collections import UserDict
 from datetime import date, datetime
 import re
-import pickle
+import json
 
 
 class Field:
     def __init__(self, value):
-        self.value = value
+        self.set_value(value)
 
     def __str__(self):
         return str(self.value)
@@ -34,25 +34,34 @@ class Name(Field):
 
 
 class Phone(Field):
-     def set_value(self, value):
+    def set_value(self, value):
         if not re.match(r'^\+38\d{10}$', value):
-            raise ValueError("Phone number should be in the format +380XXXXXXXXX")
+            raise ValueError(
+                "Phone number should be in the format +380XXXXXXXXX")
         self.value = value
 
 
 class Birthday(Field):
-    def __init__(self, value):
+    def set_value(self, value):
         try:
             datetime.strptime(value, '%Y-%m-%d')
         except ValueError:
             raise ValueError("Incorrect date format, should be YYYY-MM-DD")
         self.value = value
 
+    @property
+    def month(self):
+        return self.value.month
+
+    @property
+    def day(self):
+        return self.value.day
+
     def next_birthday(self):
         today = date.today()
-        next_birthday = date(today.year, self.value.month, self.value.day)
+        next_birthday = date(today.year, self.month, self.day)
         if next_birthday < today:
-            next_birthday = date(today.year + 1, self.value.month, self.value.day)
+            next_birthday = date(today.year + 1, self.month, self.day)
         return next_birthday
 
     def days_to_birthday(self):
@@ -92,11 +101,8 @@ class Record:
 
 
 class AddressBook(UserDict):
-    def __init__(self):
-        super().__init__()
-
     def add_record(self, record):
-        self.data[record.name.value.lower()] = record
+        self.data[record.name.value] = record
 
     def search(self, search_str):
         results = []
@@ -119,11 +125,39 @@ class AddressBook(UserDict):
     def __next__(self):
         if self.iter_index < len(self.iter_keys):
             records = []
-            for key in self.iter_keys[self.iter_index:min(self.iter_index+self.n, len(self.iter_keys))]:
-                records.append(f"{self.data[key].name.value}: {', '.join([phone.value for phone in self.data[key].phones])}")
+            for key in self.iter_keys[self.iter_index:min(self.iter_index + self.n, len(self.iter_keys))]:
+                records.append(
+                    f"{self.data[key].name.value}: {', '.join([phone.value for phone in self.data[key].phones])}")
             self.iter_index += self.n
             return "\n".join(records)
         raise StopIteration
+
+    def save_to_file(self, filename):
+        with open(filename, 'w') as f:
+            data = {'records': [
+                record.__dict__ for record in self.data.values()]}
+            json.dump(data, f, indent=4)
+
+    @classmethod
+    def load_from_file(cls, filename):
+        with open(filename, 'r') as f:
+            data = json.load(f)
+            address_book = cls()
+            for record_data in data['records']:
+                name = record_data['name']['value']
+                phones = [phone['value'] for phone in record_data['phones']]
+                birthday_data = record_data['birthday']
+                if birthday_data:
+                    day = birthday_data['day']
+                    month = birthday_data['month']
+                    birthday = Birthday(day, month)
+                    birthday.set_value(birthday_data['value'])
+                else:
+                    birthday = None
+                record = Record(name, phones, birthday)
+                address_book.add_record(record)
+            return address_book
+
 
 def input_error(func):
     def inner(*args):
@@ -131,39 +165,8 @@ def input_error(func):
             return func(*args)
         except (KeyError, ValueError, IndexError) as f:
             return str(f)
-    return inner
 
-class CLI:
-    def __init__(self):
-        self.address_book = AddressBook()
-        self.commands = {
-            "hello": handle_hello,
-            "add": handle_add,
-            "change": handle_change,
-            "phone": handle_phone,
-            "show all": handle_show_all,
-            "search": handle_search,
-            "birthday": handle_birthday,
-            "exit": handle_exit
-        }
-        
-    def run(self):
-        print("Hello! This is your address book.")
-        print("Enter a command (type 'hello' for a list of commands):")
-        while True:
-            user_input = input("> ")
-            command_parts = user_input.split(maxsplit=1)
-            command_name = command_parts[0].lower()
-            if command_name not in self.commands:
-                print(f"Unknown command '{command_name}'. Type 'hello' for a list of commands.")
-                continue
-            if len(command_parts) > 1:
-                args = command_parts[1].strip()
-            else:
-                args = ""
-            result = self.commands[command_name](args, self.address_book)
-            if result is not None:
-                print(result)
+    return inner
 
 
 @input_error
@@ -175,7 +178,7 @@ def handle_hello():
 def handle_add(name, phone, address_book):
     if len(name.strip()) == 0 or len(phone.strip()) == 0:
         raise ValueError("Please enter both name and phone number")
-    record = address_book.records.get(name.lower())
+    record = address_book.get(name.lower())
     if not record:
         record = Record(name)
         address_book.add_record(record)
@@ -192,50 +195,36 @@ def handle_change(name, old_phone, new_phone, address_book):
         raise ValueError(f"{old_phone} is not in {name}'s phones")
     return f"Changed phone {old_phone} to {new_phone} for contact {name}"
 
+
 @input_error
 def handle_phone(name, address_book):
-    record = address_book.data.get(name.lower())
+    record = address_book.get(name.lower())
     if not record:
         raise KeyError(f"{name} is not in contacts")
     return "\n".join([phone.value for phone in record.phones])
-                
+
 
 @input_error
-def handle_show_all(_, address_book):
-    result = ""
-    for record in address_book.data.values():
-        result += f"{record.name.value}: {', '.join([phone.value for phone in record.phones])}\n"
-    return result
+def handle_show_all(address_book):
+    return "\n".join(
+        [f"{name}: {', '.join([phone.value for phone in record.phones])}" for name, record in address_book.items()])
 
 
 @input_error
 def handle_search(search_str, address_book):
-    results = address_book.search(search_str)
-    if len(results) == 0:
-        return f"No matches found for '{search_str}'"
+    if len(search_str.strip()) == 0:
+        raise ValueError("Please enter a search string")
+    split_command = search_str.split()
+    if len(split_command) < 2:
+        raise ValueError(
+            "Invalid search format. Please enter a search string and try again.")
+    results = address_book.search(split_command[1])
+    if not results:
+        return f"No contacts found for '{split_command[1]}'"
     else:
-        result = ""
-        for record in results:
-            result += f"{record.name.value}: {', '.join([phone.value for phone in record.phones])}\n"
-        return result
-    
+        return "\n".join(
+            [f"{record.name.value}: {', '.join([phone.value for phone in record.phones])}" for record in results])
 
-@input_error
-def handle_birthday(_, address_book):
-    result = ""
-    for record in address_book.data.values():
-        days_to_birthday = record.days_to_birthday()
-        if days_to_birthday is not None:
-            result += f"{record.name.value}'s birthday is in {days_to_birthday} days\n"
-    if result == "":
-        return "No birthdays coming up"
-    else:
-        return result
-
-
-def handle_exit(*_):
-    print("Goodbye!")
-    exit()
 
 def main():
     address_book = AddressBook()
@@ -283,12 +272,5 @@ def main():
             print("Unknown command. Please try again.")
 
 
-address_book = AddressBook()
-address_book.add_contact('John Doe', '123456789', 'johndoe@example.com')
-address_book.save_to_file('address_book.json')
-
-
-
-if __name__ == "__main__":
-    cli = CLI()
-    cli.run()
+if __name__ == '__main__':
+    main()
